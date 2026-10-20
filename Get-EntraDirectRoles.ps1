@@ -62,7 +62,9 @@ $report = foreach ($assignment in $roleAssignments) {
     # Check if the principal is a user (PrincipalType or trying to fetch as user)
     # We query the user object by ID to verify and get DisplayName/UPN
     try {
-        $user = Get-MgUser -UserId $assignment.PrincipalId -ErrorAction Stop
+        $user = Get-MgUser -UserId $assignment.PrincipalId -Property "DisplayName,UserPrincipalName,OnPremisesSyncEnabled" -ErrorAction Stop
+        # Determine if account is Cloud-Only or Synchronized from on-premises AD
+        $accountType = if ($user.OnPremisesSyncEnabled -eq $true) { "Synchronized (Hybrid)" } else { "Cloud-Only" }
         
         # If successfully found, it's a user account with a direct assignment
         [PSCustomObject]@{
