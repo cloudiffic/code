@@ -1,0 +1,84 @@
+<#
+.SYNOPSIS
+    Exports standing/direct Entra ID admin role assignments outside of PIM to a CSV file.
+.DESCRIPTION
+    Uses Microsoft Graph PowerShell SDK to fetch permanent role assignments, 
+    resolves user, group, or service principal names, and saves the output to a CSV.
+.REQUIREMENTS
+    - Microsoft.Graph PowerShell Module (`Install-Module Microsoft.Graph`)
+    - Scopes: RoleManagement.Read.Directory, Directory.Read.All
+#>
+
+# 1. Connect to Microsoft Graph with required permission scopes
+$RequiredScopes = @("RoleManagement.Read.Directory", "Directory.Read.All")
+Connect-MgGraph -Scopes $RequiredScopes -NoWelcome
+
+Write-Host "Fetching Entra ID Directory Role Definitions..." -ForegroundColor Cyan
+$RoleDefinitions = Get-MgRoleManagementDirectoryRoleDefinition -All | Group-Object Id -AsHashTable
+
+Write-Host "Fetching Direct Role Assignments (Standing Access)..." -ForegroundColor Cyan
+$DirectAssignments = Get-MgRoleManagementDirectoryRoleAssignment -All
+
+$Results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+Write-Host "Resolving principal details for $($DirectAssignments.Count) direct assignments..." -ForegroundColor Cyan
+
+foreach ($Assignment in $DirectAssignments) {
+    # Match Role Name
+    $RoleName = if ($RoleDefinitions.ContainsKey($Assignment.RoleDefinitionId)) {
+        $RoleDefinitions[$Assignment.RoleDefinitionId].DisplayName
+    } else {
+        "Unknown Role ($($Assignment.RoleDefinitionId))"
+    }
+
+    # Initialize Principal Info
+    $PrincipalType = "Unknown"
+    $PrincipalName = "Unknown ($($Assignment.PrincipalId))"
+    $UserPrincipalName = "N/A"
+
+    # Resolve Principal Details (User, Service Principal, or Group)
+    try {
+        $User = Get-MgUser -UserId $Assignment.PrincipalId -ErrorAction SilentlyContinue
+        if ($User) {
+            $PrincipalType = "User"
+            $PrincipalName = $User.DisplayName
+            $UserPrincipalName = $User.UserPrincipalName
+        } else {
+            $ServicePrincipal = Get-MgServicePrincipal -ServicePrincipalId $Assignment.PrincipalId -ErrorAction SilentlyContinue
+            if ($ServicePrincipal) {
+                $PrincipalType = "Enterprise App / Service Principal"
+                $PrincipalName = $ServicePrincipal.DisplayName
+                $UserPrincipalName = $ServicePrincipal.AppId
+            } else {
+                $Group = Get-MgGroup -GroupId $Assignment.PrincipalId -ErrorAction SilentlyContinue
+                if ($Group) {
+                    $PrincipalType = "Group"
+                    $PrincipalName = $Group.DisplayName
+                    $UserPrincipalName = "Group Object"
+                }
+            }
+        }
+    } catch {
+        # Fallback if lookup encounters issues
+    }
+
+    # Add to collection
+    $Results.Add([PSCustomObject]@{
+        RoleName          = $RoleName
+        PrincipalType     = $PrincipalType
+        DisplayName       = $PrincipalName
+        UserPrincipalName = $UserPrincipalName
+        PrincipalId       = $Assignment.PrincipalId
+        DirectoryScope    = $Assignment.DirectoryScopeId
+        AssignmentId      = $Assignment.Id
+    })
+}
+
+# 2. Export Results to CSV
+$CsvFileName = "Direct_Entra_Admin_Roles_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+$CsvPath = Join-Path $PWD $CsvFileName
+
+$Results | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding utf8
+
+Write-Host "`nSuccessfully exported $($Results.Count) direct role assignments to:" -ForegroundColor Green
+Write-Host "$CsvPath" -ForegroundColor Yellow
