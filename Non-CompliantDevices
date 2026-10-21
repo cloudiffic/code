@@ -1,0 +1,68 @@
+# Find devices that are non compliant in Intune by OS
+Connect-MgGraph -Scopes "DeviceManagementManagedDevices.Read.All", "DeviceManagementApps.Read.All"
+
+$base = "https://graph.microsoft.com/beta"
+
+# Stage 1: pull all devices (handle paging)
+$devices = @()
+$uri = "$base/deviceManagement/managedDevices"
+do {
+    $r = Invoke-MgGraphRequest -Method GET -Uri $uri
+    $devices += $r.value
+    $uri = $r.'@odata.nextLink'
+} while ($uri)
+
+# Stage 2: compliance + stale
+$byOS = $devices | Group-Object operatingSystem | Select-Object Name, Count
+$nonCompliant = $devices | Where-Object { $_.complianceState -ne "compliant" }
+$stale = $devices | Where-Object { [datetime]$_.lastSyncDateTime -lt (Get-Date).AddDays(-7) }
+
+# Stage 3: apps
+$apps = @()
+$uri = "$base/deviceAppManagement/mobileApps"
+do {
+    $r = Invoke-MgGraphRequest -Method GET -Uri $uri
+    $apps += $r.value
+    $uri = $r.'@odata.nextLink'
+} while ($uri)
+
+# Stage 4: HTML report
+$osRows = ($byOS | ForEach-Object { "<tr><td>$($_.Name)</td><td>$($_.Count)</td></tr>" }) -join ""
+$staleRows = ($stale | ForEach-Object {
+        "<tr><td>$($_.deviceName)</td><td>$($_.userPrincipalName)</td><td>$($_.operatingSystem)</td><td>$($_.lastSyncDateTime)</td></tr>"
+    }) -join ""
+
+$html = @"
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Tenant Health Check</title>
+<style>
+  body { font-family: Segoe UI, sans-serif; margin: 40px; color: #1e1e1e; }
+  h1 { font-size: 24px; }
+  .cards { display: flex; gap: 16px; margin: 24px 0; }
+  .card { flex: 1; padding: 20px; border-radius: 12px; background: #f4f6fb; }
+  .card .n { font-size: 32px; font-weight: 700; }
+  .card.bad .n { color: #ef4444; }
+  .card.warn .n { color: #f59e0b; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #e5e7eb; }
+  th { background: #4a9eed; color: #fff; }
+  h2 { margin-top: 32px; }
+</style></head><body>
+<h1>Tenant Health Check</h1>
+<p>Generated $(Get-Date -Format "yyyy-MM-dd HH:mm")</p>
+<div class="cards">
+  <div class="card"><div>Total devices</div><div class="n">$($devices.Count)</div></div>
+  <div class="card bad"><div>Non-compliant</div><div class="n">$($nonCompliant.Count)</div></div>
+  <div class="card warn"><div>Stale (7d+)</div><div class="n">$($stale.Count)</div></div>
+  <div class="card"><div>Total apps</div><div class="n">$($apps.Count)</div></div>
+</div>
+<h2>Devices by OS</h2>
+<table><tr><th>OS</th><th>Count</th></tr>$osRows</table>
+<h2>Stale Devices</h2>
+<table><tr><th>Device</th><th>User</th><th>OS</th><th>Last Sync</th></tr>$staleRows</table>
+</body></html>
+"@
+
+$html | Out-File -FilePath "./tenant-health.html" -Encoding utf8
+
+Write-Host "Report -> ./tenant-health.html" -ForegroundColor Green
