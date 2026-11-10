@@ -1,0 +1,92 @@
+#List alldevice config policies and number of objects it is applied to
+Write-Host "Fetching Intune configuration policies..." -ForegroundColor Cyan
+
+# 1. Fetch Settings Catalog (configurationPolicies) and Legacy Profiles (deviceConfigurations)
+$settingsCatalogProfiles = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/configurationPolicies" -OutputType PSObject
+$legacyProfiles = Get-MgDeviceManagementDeviceConfiguration -All
+
+$allProfiles = @()
+
+if ($settingsCatalogProfiles.value) {
+    foreach ($p in $settingsCatalogProfiles.value) {
+        $allProfiles += [PSCustomObject]@{
+            Id   = $p.id
+            Name = $p.name
+            Type = "Settings Catalog"
+        }
+    }
+}
+
+if ($legacyProfiles) {
+    foreach ($p in $legacyProfiles) {
+        $allProfiles += [PSCustomObject]@{
+            Id   = $p.Id
+            Name = $p.DisplayName
+            Type = "Legacy Profile ($($p.ODataType.Split('.')[-1]))"
+        }
+    }
+}
+
+Write-Host "Found $($allProfiles.Count) total profiles. Calculating device assignments..." -ForegroundColor Cyan
+
+$results = foreach ($profile in $allProfiles) {
+    $deviceCount = 0
+    $targetUri = if ($profile.Type -eq "Settings Catalog") {
+        "https://graph.microsoft.com/v1.0/deviceManagement/configurationPolicies('$($profile.Id)')/assignments"
+    } else {
+        "https://graph.microsoft.com/v1.0/deviceManagement/deviceConfigurations('$($profile.Id)')/assignments"
+    }
+
+    try {
+        $assignments = (Invoke-MgGraphRequest -Method GET -Uri $targetUri).value
+        $groupIDs = @()
+
+        foreach ($assignment in $assignments) {
+            if ($assignment.target.odatatype -eq "#microsoft.graph.groupAssignmentTarget") {
+                $groupIDs += $assignment.target.groupId
+            }
+        }
+
+        if ($groupIDs.Count -gt 0) {
+            $uniqueDevices = [System.Collections.Generic.HashSet[string]]::new()
+            
+            foreach ($groupId in $groupIDs) {
+                try {
+                    $members = Get-MgGroupMember -GroupId $groupId -All
+                    foreach ($member in $members) {
+                        if ($member.AdditionalProperties['@odata.type'] -eq "#microsoft.graph.device") {
+                            [void]$uniqueDevices.Add($member.Id)
+                        }
+                    }
+                } catch {
+                    # Handle inaccessible groups gracefully
+                }
+            }
+            $deviceCount = $uniqueDevices.Count
+        } else {
+            $isAllDevices = $assignments | Where-Object { $_.target.odatatype -like "*allDevices*" }
+            if ($isAllDevices) {
+                $allDevices = Get-MgDevice -All
+                $deviceCount = $allDevices.Count
+            }
+        }
+    } catch {
+        $deviceCount = "Error checking assignments"
+    }
+
+    [PSCustomObject]@{
+        "Profile Name"   = $profile.Name
+        "Profile Type"   = $profile.Type
+        "Targeted Count" = $deviceCount
+    }
+}
+
+# 2. Export Results to CSV
+$csvPath = "$HOME\Desktop\IntuneProfileDeviceCounts.csv"
+$results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding utf8
+
+Write-Host "Successfully exported assignment report to $csvPath" -ForegroundColor Green
+
+# Optional: Display in grid view and table
+$results | Out-GridView -Title "Intune Configuration Profiles and Targeted Device Count"
+$results | Format-Table -AutoSize
